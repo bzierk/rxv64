@@ -68,6 +68,7 @@ mod syscalls {
     syscall!(sbrk, SYS::SBRK, *mut u8, incr: isize);
     syscall!(sleep, SYS::SLEEP, i32, ticks: i32);
     syscall!(uptime, SYS::UPTIME, i32);
+    syscall!(getpinfo, SYS::GETPINFO, i32, pinfo: *mut u8);
 }
 
 // Note: the very existence of this block of code annoys me.

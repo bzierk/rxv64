@@ -1,4 +1,4 @@
-use crate::arch;
+use crate::{arch, println};
 use crate::file;
 use crate::fs;
 use crate::initcode;
@@ -12,12 +12,16 @@ use crate::vm;
 use crate::volatile;
 use crate::Result;
 use core::cell::{Cell, RefCell};
-use core::cmp;
+use core::{cmp, mem};
 use core::fmt;
 use core::mem::size_of;
 use core::ptr::{self, null_mut};
 use core::slice;
 use core::sync::atomic::AtomicBool;
+use core::time::Duration;
+use syslib::stat::Stat;
+use crate::arch::sleep;
+use crate::file::{File, OpenFlags};
 
 static PROCS: Mutex<[Proc; param::NPROC]> =
     Mutex::new("procs", [const { Proc::new() }; param::NPROC]);
@@ -47,7 +51,7 @@ pub unsafe fn init(kpgtbl: &vm::PageTable) {
         p.set_state(ProcState::RUNNABLE);
         Some(())
     })
-    .expect("allocating init proc failed");
+        .expect("allocating init proc failed");
 }
 
 fn make_init_user_page(init_code: &[u8]) -> &'static mut arch::Page {
@@ -118,6 +122,81 @@ impl PerProc {
     }
 }
 
+/// A structure representing the state of processes in the system
+///
+/// Given the limitations of `no_std` and the fact that `param::NPROC` is
+/// a constant, using fixed-size arrays is a reasonable way to represent
+/// this data.
+///
+/// # Pros
+/// * By using arrays, memory allocation is done at compile time.
+/// * Given the index of a process, we can access its data in constant time.
+///
+/// # Cons
+/// * If `param::NPROC` is large, we waste a lot of memory.
+/// * If there are very few processes, the data structure will be sparse and there
+/// will be significant memory waste.
+/// * Iterating over the data structure is O(N) which, given a large `param::NPROC`,
+/// can be very slow.
+#[repr(C)]
+pub struct ProcStats {
+    in_use: [u32; param::NPROC],
+    pid: [u32; param::NPROC],
+    tickets: [u32; param::NPROC],
+    hi_ticks: [u32; param::NPROC],
+    lo_ticks: [u32; param::NPROC],
+}
+
+/// Returns a `ProcStats` structure populated with data about each
+/// active process, obtained from the global `PROCS` array.
+///
+/// # Fields
+/// * `in_use`: an array indicating if a process is in use or not. A value
+/// of `1` indicates that the process is in use, while a value of `0` indicates
+/// that the process is not in use.
+/// * `pid`: an array of process IDs.
+/// * `tickets`: an array of the number of tickets assigned to each process
+/// * `hi_ticks`: an array of the number of high-priority ticks each process has accumulated
+/// * `lo_ticks`: an array of the number of low-priority ticks each process has accumulated
+///
+/// # Notes
+/// This function requires a lock on the global `PROCS` mutex which can cause
+/// unacceptable performance degradation. This is intended only to be used for
+/// diagnostic and demonstration purposes.
+pub fn get_processes(proc: &Proc, addr: usize) -> Result<()> {
+    let ps_buffer_slice = proc
+        .fetch_slice_mut(addr, mem::size_of::<ProcStats>())
+        .ok_or("bad pointer")?;
+    let mut ps = ProcStats {
+        in_use: [0; param::NPROC],
+        pid: [0; param::NPROC],
+        tickets: [0; param::NPROC],
+        hi_ticks: [0; param::NPROC],
+        lo_ticks: [0; param::NPROC],
+    };
+
+    let proc_guard = PROCS.lock();
+
+    for (index, proc) in proc_guard.iter().enumerate() {
+        ps.in_use[index] = if proc.state.get() == ProcState::UNUSED { 0 } else { 1 };
+        ps.pid[index] = proc.pid.get();
+        ps.tickets[index] = proc.tickets.get();
+        ps.hi_ticks[index] = proc.hi_ticks.get();
+        ps.lo_ticks[index] = proc.low_ticks.get();
+    }
+
+    unsafe {
+        use core::intrinsics::volatile_copy_memory;
+        volatile_copy_memory(
+            ps_buffer_slice.as_mut_ptr(),
+            &ps as *const _ as *const u8,
+            ps_buffer_slice.len(),
+        );
+    }
+    println!("Hello from get_processes syscall!");
+    Ok(())
+}
+
 pub struct Proc {
     state: Cell<ProcState>,
     pid: Cell<u32>,
@@ -127,6 +206,13 @@ pub struct Proc {
     size: Cell<usize>,
     files: RefCell<[Option<&'static file::File>; param::NOFILE]>,
     cwd: Cell<Option<&'static fs::Inode>>,
+    tickets: Cell<u32>,
+    // for lottery scheduling
+    hi_ticks: Cell<u32>,
+    // number of ticks accumulated at high priority
+    low_ticks: Cell<u32>,
+    // number of ticks accumulated at low priority
+    priority: Cell<u32>, // Priority 0 = high priority, 1 = low priority
 }
 
 impl fmt::Debug for Proc {
@@ -146,12 +232,16 @@ impl Proc {
             size: Cell::new(0),
             files: RefCell::new([None; param::NOFILE]),
             cwd: Cell::new(None),
+            tickets: Cell::new(0),
+            hi_ticks: Cell::new(0),
+            low_ticks: Cell::new(0),
+            priority: Cell::new(0),
         }
     }
 
     pub fn with_pgtbl<F, U>(&self, thunk: F) -> U
-    where
-        F: FnOnce(&mut vm::PageTable) -> U,
+        where
+            F: FnOnce(&mut vm::PageTable) -> U,
     {
         let mut data = self.data.borrow_mut();
         let pgtbl = data.pgtbl.as_mut().expect("pgtbl");
@@ -180,6 +270,38 @@ impl Proc {
 
     pub fn set_cwd(&self, ip: &'static fs::Inode) {
         self.cwd.set(Some(ip));
+    }
+
+    pub fn tickets(&self) -> u32 {
+        self.tickets.get()
+    }
+
+    pub fn set_tickets(&self, tickets: u32) {
+        self.tickets.set(tickets);
+    }
+
+    pub fn hi_ticks(&self) -> u32 {
+        self.hi_ticks.get()
+    }
+
+    pub fn set_hi_ticks(&self, hi_ticks: u32) {
+        self.hi_ticks.set(hi_ticks);
+    }
+
+    pub fn low_ticks(&self) -> u32 {
+        self.low_ticks.get()
+    }
+
+    pub fn set_low_ticks(&self, low_ticks: u32) {
+        self.low_ticks.set(low_ticks);
+    }
+
+    pub fn priority(&self) -> u32 {
+        self.priority.get()
+    }
+
+    pub fn set_priority(&self, priority: u32) {
+        self.priority.set(priority);
     }
 
     pub fn set_size(&self, size: usize) {
@@ -351,7 +473,7 @@ impl Proc {
             return None;
         }
         #[allow(clippy::cast_ptr_alignment)]
-        let ptr = off as *const usize;
+            let ptr = off as *const usize;
         Some(unsafe { ptr::read_unaligned(ptr) })
     }
 
@@ -591,8 +713,8 @@ extern "C" fn firstret() -> u32 {
 }
 
 fn alloc<F>(thunk: F) -> Option<u32>
-where
-    F: FnOnce(&Proc) -> Option<()>,
+    where
+        F: FnOnce(&Proc) -> Option<()>,
 {
     fn init_proc(p: &Proc, stack: &'static mut arch::Page) -> u32 {
         p.set_state(ProcState::EMBRYO);

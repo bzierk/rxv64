@@ -19,8 +19,8 @@ pub unsafe fn init() {
 }
 
 fn to_i64<T: TryInto<i64> + Debug>(v: T) -> i64
-where
-    <T as TryInto<i64>>::Error: Debug,
+    where
+        <T as TryInto<i64>>::Error: Debug,
 {
     v.try_into().unwrap()
 }
@@ -50,6 +50,7 @@ extern "C" fn syscall(a0: usize, a1: usize, a2: usize, num: usize) -> i64 {
         LINK => sysfile::link(proc, a0, a1).map_or(-1, |_| 0),
         MKDIR => sysfile::mkdir(proc, a0).map_or(-1, |_| 0),
         CLOSE => sysfile::close(proc, a0).map_or(-1, |_| 0),
+        GETPINFO => proc::get_processes(proc, a0).map_or(-1, |_| 0),
         _ => {
             println!("syscall number {num}, a0={a0}, a1={a1}, a2={a2}");
             -1
