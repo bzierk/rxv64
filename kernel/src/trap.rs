@@ -1,7 +1,7 @@
 use crate::arch;
 use crate::kbd;
 use crate::println;
-use crate::proc::{self, Proc};
+use crate::proc::{self, PriorityLevel, Proc};
 use crate::sd;
 use crate::spinlock::SpinMutex as Mutex;
 use crate::uart;
@@ -41,6 +41,7 @@ pub fn ticksleep(proc: &Proc, nticks: u64) -> Result<()> {
 }
 
 pub extern "C" fn trap(vecnum: u32, frame: &mut arch::TrapFrame) {
+    // println!("trap: vecnum = {}", vecnum);
     match vecnum {
         PAGE_FAULT => {
             if !frame.is_user() {
@@ -101,7 +102,27 @@ pub extern "C" fn trap(vecnum: u32, frame: &mut arch::TrapFrame) {
     // interrupts were on while locks held, would need to check
     // nlock.
     if vecnum == TIMER_INTR {
-        proc::yield_if_running();
+        if let Some(proc) = proc::try_myproc() {
+            match proc.priority() {
+                PriorityLevel::High => {
+                    proc.inc_hi_ticks();
+                    proc.decrease_priority();
+                }
+                PriorityLevel::Low => {
+                    proc.inc_low_ticks();
+                    if proc.low_ticks() > proc::MIN_LOW_TICKS {
+                        proc::yield_if_running();
+                    }
+                }
+                _ => {
+                    // Invalid priority, immediately yield
+                    proc::yield_if_running();
+                }
+            }
+        } else {
+            // No current process, yielding
+            proc::yield_if_running();
+        }
     }
 
     // Check if the process has been killed since we yielded.
