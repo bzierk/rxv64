@@ -1,4 +1,3 @@
-use crate::{arch, println};
 use crate::file;
 use crate::fs;
 use crate::initcode;
@@ -6,27 +5,30 @@ use crate::kalloc;
 use crate::kmem;
 use crate::param;
 use crate::param::{USEREND, USERSTACK};
-use crate::spinlock::{without_intrs, SpinMutex as Mutex};
+use crate::random::LinearCongruentialGenerator;
+use crate::spinlock::{without_intrs, MutexGuard, SpinMutex as Mutex};
 use crate::syscall;
 use crate::vm;
 use crate::volatile;
 use crate::Result;
+use crate::{arch, println};
 use core::cell::{Cell, RefCell};
-use core::{cmp, mem};
 use core::fmt;
 use core::mem::size_of;
 use core::ptr::{self, null_mut};
 use core::slice;
 use core::sync::atomic::AtomicBool;
 use core::time::Duration;
+use core::{cmp, mem};
 use syslib::stat::Stat;
-use crate::arch::sleep;
-use crate::file::{File, OpenFlags};
 
 static PROCS: Mutex<[Proc; param::NPROC]> =
     Mutex::new("procs", [const { Proc::new() }; param::NPROC]);
 
 static mut INIT_PROC: usize = 0;
+
+pub static MIN_LOW_TICKS: u32 = 2; // The minimum number of ticks a process is guaranteed when it is place
+                                   // on the low priority queue.
 
 pub unsafe fn init(kpgtbl: &vm::PageTable) {
     let page = make_init_user_page(initcode::start_init_slice());
@@ -51,7 +53,7 @@ pub unsafe fn init(kpgtbl: &vm::PageTable) {
         p.set_state(ProcState::RUNNABLE);
         Some(())
     })
-        .expect("allocating init proc failed");
+    .expect("allocating init proc failed");
 }
 
 fn make_init_user_page(init_code: &[u8]) -> &'static mut arch::Page {
@@ -84,6 +86,44 @@ pub enum ProcState {
     RUNNABLE,
     RUNNING,
     ZOMBIE(i32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PriorityLevel {
+    High,
+    Low,
+}
+
+/// Keeps track of the number of active tickets at each priority level across
+/// all processes.
+#[derive(Debug)]
+pub struct ProcTracker {
+    pub htickets: u32,
+    pub ltickets: u32,
+    pub counter: u32,
+    pub winner: usize,
+}
+
+impl ProcTracker {
+    pub fn new() -> ProcTracker {
+        ProcTracker {
+            htickets: 0,
+            ltickets: 0,
+            counter: 0,
+            winner: 0,
+        }
+    }
+
+    pub fn add_tickets(&mut self, tickets: u32, priority: PriorityLevel) {
+        match priority {
+            PriorityLevel::High => self.htickets += tickets,
+            PriorityLevel::Low => self.ltickets += tickets,
+        }
+    }
+
+    pub fn inc_counter(&mut self, tickets: u32) {
+        self.counter += tickets;
+    }
 }
 
 #[derive(Debug)]
@@ -178,7 +218,11 @@ pub fn get_processes(proc: &Proc, addr: usize) -> Result<()> {
     let proc_guard = PROCS.lock();
 
     for (index, proc) in proc_guard.iter().enumerate() {
-        ps.in_use[index] = if proc.state.get() == ProcState::UNUSED { 0 } else { 1 };
+        ps.in_use[index] = if proc.state.get() == ProcState::UNUSED {
+            0
+        } else {
+            1
+        };
         ps.pid[index] = proc.pid.get();
         ps.tickets[index] = proc.tickets.get();
         ps.hi_ticks[index] = proc.hi_ticks.get();
@@ -212,7 +256,7 @@ pub struct Proc {
     // number of ticks accumulated at high priority
     low_ticks: Cell<u32>,
     // number of ticks accumulated at low priority
-    priority: Cell<u32>, // Priority 0 = high priority, 1 = low priority
+    priority: Cell<PriorityLevel>, // Scheduler will schedule based on descending priority
 }
 
 impl fmt::Debug for Proc {
@@ -232,16 +276,16 @@ impl Proc {
             size: Cell::new(0),
             files: RefCell::new([None; param::NOFILE]),
             cwd: Cell::new(None),
-            tickets: Cell::new(0),
+            tickets: Cell::new(1),
             hi_ticks: Cell::new(0),
             low_ticks: Cell::new(0),
-            priority: Cell::new(0),
+            priority: Cell::new(PriorityLevel::High),
         }
     }
 
     pub fn with_pgtbl<F, U>(&self, thunk: F) -> U
-        where
-            F: FnOnce(&mut vm::PageTable) -> U,
+    where
+        F: FnOnce(&mut vm::PageTable) -> U,
     {
         let mut data = self.data.borrow_mut();
         let pgtbl = data.pgtbl.as_mut().expect("pgtbl");
@@ -284,24 +328,24 @@ impl Proc {
         self.hi_ticks.get()
     }
 
-    pub fn set_hi_ticks(&self, hi_ticks: u32) {
-        self.hi_ticks.set(hi_ticks);
+    pub fn inc_hi_ticks(&self) {
+        self.hi_ticks.set(self.hi_ticks.get() + 1);
     }
 
     pub fn low_ticks(&self) -> u32 {
         self.low_ticks.get()
     }
 
-    pub fn set_low_ticks(&self, low_ticks: u32) {
-        self.low_ticks.set(low_ticks);
+    pub fn inc_low_ticks(&self) {
+        self.low_ticks.set(self.low_ticks.get() + 1);
     }
 
-    pub fn priority(&self) -> u32 {
+    pub fn priority(&self) -> PriorityLevel {
         self.priority.get()
     }
 
-    pub fn set_priority(&self, priority: u32) {
-        self.priority.set(priority);
+    pub fn decrease_priority(&self) {
+        self.priority.set(PriorityLevel::Low);
     }
 
     pub fn set_size(&self, size: usize) {
@@ -473,7 +517,7 @@ impl Proc {
             return None;
         }
         #[allow(clippy::cast_ptr_alignment)]
-            let ptr = off as *const usize;
+        let ptr = off as *const usize;
         Some(unsafe { ptr::read_unaligned(ptr) })
     }
 
@@ -669,10 +713,29 @@ extern "C" {
 }
 
 pub fn scheduler() {
+    let mut random = LinearCongruentialGenerator::default();
     loop {
-        unsafe { arch::intr_enable() };
+        unsafe { arch::intr_enable() }; // enables interrupts
         let procs = PROCS.lock();
+        let mut proc_tracker = ProcTracker::new();
+
+        // Collect the total number of tickets for all runnable processes
         for p in procs.iter().filter(|p| p.state() == ProcState::RUNNABLE) {
+            match p.priority.get() {
+                PriorityLevel::High => proc_tracker.add_tickets(p.tickets(), PriorityLevel::High),
+                PriorityLevel::Low => proc_tracker.add_tickets(p.tickets(), PriorityLevel::Low),
+            }
+        }
+
+        // Determine a winning process
+        let chosen_proc = if proc_tracker.htickets > 0 {
+            schedule_for_priority(&procs, &mut proc_tracker, &mut random, PriorityLevel::High)
+        } else {
+            schedule_for_priority(&procs, &mut proc_tracker, &mut random, PriorityLevel::Low)
+        };
+
+        // Schedule the winning process
+        if let Some(p) = chosen_proc {
             p.set_state(ProcState::RUNNING);
             arch::mycpu_mut().set_proc(p);
             unsafe {
@@ -686,14 +749,43 @@ pub fn scheduler() {
     }
 }
 
+// Generates a pseudo-random number in the range [0, total_tickets) and then iterates over processes
+// until the counter is greater than or equal to the random number. The process that satisfies this
+// condition is the winning process.
+fn schedule_for_priority<'a>(
+    procs: &'a MutexGuard<'a, [Proc; 256]>,
+    proc_tracker: &mut ProcTracker,
+    random: &mut LinearCongruentialGenerator,
+    priority: PriorityLevel,
+) -> Option<&'a Proc> {
+    let total_tickets = match priority {
+        PriorityLevel::High => proc_tracker.htickets,
+        PriorityLevel::Low => proc_tracker.ltickets,
+    };
+
+    let winner = random.next(total_tickets);
+    for p in procs
+        .iter()
+        .filter(|p| p.state.get() == ProcState::RUNNABLE && p.priority.get() == priority)
+    {
+        proc_tracker.inc_counter(p.tickets());
+        if proc_tracker.counter >= winner {
+            return Some(p);
+        }
+    }
+    None
+}
+
 // Disable interrupts so that we are not rescheduled
 // while reading proc from the cpu structure
 pub fn try_myproc() -> Option<&'static Proc> {
-    without_intrs(|| arch::mycpu().proc())
+    let proc = without_intrs(|| arch::mycpu().proc());
+    proc
 }
 
 pub fn myproc() -> &'static Proc {
-    try_myproc().expect("myproc called with no proc")
+    let proc = try_myproc().expect("myproc called with no proc");
+    proc
 }
 
 extern "C" fn forkret() -> u32 {
@@ -713,8 +805,8 @@ extern "C" fn firstret() -> u32 {
 }
 
 fn alloc<F>(thunk: F) -> Option<u32>
-    where
-        F: FnOnce(&Proc) -> Option<()>,
+where
+    F: FnOnce(&Proc) -> Option<()>,
 {
     fn init_proc(p: &Proc, stack: &'static mut arch::Page) -> u32 {
         p.set_state(ProcState::EMBRYO);
