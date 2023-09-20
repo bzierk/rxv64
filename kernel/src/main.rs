@@ -29,6 +29,7 @@ mod param;
 mod pci;
 mod pipe;
 mod proc;
+mod random;
 mod sd;
 mod sleeplock;
 mod smp;
@@ -60,20 +61,35 @@ type Result<T> = result::Result<T, &'static str>;
 pub unsafe trait FromZeros {}
 
 unsafe impl<T: ?Sized> FromZeros for *const T {}
+
 unsafe impl<T: ?Sized> FromZeros for *mut T {}
+
 unsafe impl FromZeros for bool {}
+
 unsafe impl FromZeros for char {}
+
 unsafe impl FromZeros for f32 {}
+
 unsafe impl FromZeros for f64 {}
+
 unsafe impl FromZeros for isize {}
+
 unsafe impl FromZeros for usize {}
+
 unsafe impl FromZeros for i8 {}
+
 unsafe impl FromZeros for u8 {}
+
 unsafe impl FromZeros for i16 {}
+
 unsafe impl FromZeros for u16 {}
+
 unsafe impl FromZeros for i32 {}
+
 unsafe impl FromZeros for u32 {}
+
 unsafe impl FromZeros for i64 {}
+
 unsafe impl FromZeros for u64 {}
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
