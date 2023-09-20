@@ -13,7 +13,14 @@ pub struct LinearCongruentialGenerator {
 }
 
 impl LinearCongruentialGenerator {
-    pub fn new(seed: u32, start: u32, end: u32, multiplier: u32, increment: u32, modulus: u128) -> Self {
+    pub fn new(
+        seed: u32,
+        start: u32,
+        end: u32,
+        multiplier: u32,
+        increment: u32,
+        modulus: u128,
+    ) -> Self {
         Self {
             seed,
             start,
@@ -37,27 +44,28 @@ impl LinearCongruentialGenerator {
         }
     }
 
-    pub fn next(&mut self) -> u32 {
+    pub fn next(&mut self, max: u32) -> u32 {
         // Compute random number to serve as seed for next iteration
-        let new_seed = (self.multiplier as u128 * self.seed as u128 * self.increment as u128) % self.modulus;
+        let new_seed =
+            (self.multiplier as u128 * self.seed as u128 * self.increment as u128) % self.modulus;
 
         self.seed = new_seed as u32;
 
-        return new_seed as u32 % (self.end + 1);
+        return new_seed as u32 % (max + 1);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::println;
     use super::*;
+    use crate::println;
 
     #[test]
     fn test_lcg() {
         let mut lcg = LinearCongruentialGenerator::default();
 
         for _ in 0..100 {
-            println!("{}", lcg.next());
+            println!("{}", lcg.next(255));
         }
     }
 }
