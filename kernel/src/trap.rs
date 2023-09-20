@@ -114,10 +114,6 @@ pub extern "C" fn trap(vecnum: u32, frame: &mut arch::TrapFrame) {
                         proc::yield_if_running();
                     }
                 }
-                _ => {
-                    // Invalid priority, immediately yield
-                    proc::yield_if_running();
-                }
             }
         } else {
             // No current process, yielding
