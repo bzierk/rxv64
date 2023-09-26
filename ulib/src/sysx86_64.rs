@@ -69,6 +69,7 @@ mod syscalls {
     syscall!(sleep, SYS::SLEEP, i32, ticks: i32);
     syscall!(uptime, SYS::UPTIME, i32);
     syscall!(getpinfo, SYS::GETPINFO, i32, pinfo: *mut u8);
+    syscall!(settickets, SYS::SETTICKETS, i32, tickets: i32);
 }
 
 // Note: the very existence of this block of code annoys me.

@@ -5,7 +5,6 @@
 #include <procstats.h>
 
 int main(int argc, char *argv[]) {
-    printf("Hello, World!\n");
     ProcStats stats;
 
     if (getpinfo(&stats) < 0) {

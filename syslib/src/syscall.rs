@@ -20,6 +20,7 @@ pub const LINK: usize = 19;
 pub const MKDIR: usize = 20;
 pub const CLOSE: usize = 21;
 pub const GETPINFO: usize = 22;
+pub const SETTICKETS: usize = 23;
 
 pub const O_READ: usize = 0x0000;
 pub const O_WRITE: usize = 0x0001;

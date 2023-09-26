@@ -35,7 +35,7 @@ impl LinearCongruentialGenerator {
         // Values used by the Borland Software Company
         // source - https://en.wikipedia.org/wiki/Linear_congruential_generator
         Self {
-            seed: 35547,
+            seed: 12345,
             start: 0,
             end: RAND_MAX,
             multiplier: 22659477,
@@ -63,9 +63,25 @@ mod tests {
     #[test]
     fn test_lcg() {
         let mut lcg = LinearCongruentialGenerator::default();
+        const SAMPLE_SIZE: usize = 1000;
+        const RANGE: usize = 1000;
+        const BAND_SIZE: usize = RANGE / 10;
+        const BANDS: usize = (RANGE + BAND_SIZE) / BAND_SIZE;
+        let mut counts = [0; BANDS];
 
-        for _ in 0..100 {
-            println!("{}", lcg.next(255));
+        for _ in 0..SAMPLE_SIZE {
+            let random_number = lcg.next(RANGE as u32) as usize;
+            let band_index = (random_number as usize) / BAND_SIZE;
+            counts[band_index] += 1;
+        }
+
+        for (band, &count) in counts.iter().enumerate() {
+            println!(
+                "{}-{}: {}",
+                band * BAND_SIZE,
+                (band + 1) * BAND_SIZE - 1,
+                count
+            );
         }
     }
 }

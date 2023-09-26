@@ -320,8 +320,9 @@ impl Proc {
         self.tickets.get()
     }
 
-    pub fn set_tickets(&self, tickets: u32) {
+    pub fn set_tickets(&self, tickets: u32) -> Result<()> {
         self.tickets.set(tickets);
+        Ok(())
     }
 
     pub fn hi_ticks(&self) -> u32 {
@@ -338,6 +339,10 @@ impl Proc {
 
     pub fn inc_low_ticks(&self) {
         self.low_ticks.set(self.low_ticks.get() + 1);
+    }
+
+    pub fn set_priority(&self, priority: PriorityLevel) {
+        self.priority.set(priority);
     }
 
     pub fn priority(&self) -> PriorityLevel {
@@ -460,6 +465,7 @@ impl Proc {
             }
             np.set_parent(self.as_chan());
             np.set_size(self.size());
+            np.set_priority(PriorityLevel::High);
             let mut nfiles = np.files.borrow_mut();
             let files = self.files.borrow();
             for (k, maybe_file) in files.iter().enumerate() {
@@ -712,8 +718,29 @@ extern "C" {
     fn swtch(from: *mut *mut arch::Context, to: &arch::Context);
 }
 
+#[cfg(not(feature = "priority_scheduler"))]
+pub fn scheduler() {
+    loop {
+        unsafe { arch::intr_enable() };
+        let procs = PROCS.lock();
+        for p in procs.iter().filter(|p| p.state() == ProcState::RUNNABLE) {
+            p.set_state(ProcState::RUNNING);
+            arch::mycpu_mut().set_proc(p);
+            unsafe {
+                vm::switch(p.data.borrow().pgtbl.as_ref().unwrap());
+                swtch(arch::mycpu_mut().mut_ptr_to_scheduler_ptr(), p.context());
+                vm::switch(&crate::KPGTBL);
+            }
+            arch::mycpu_mut().clear_proc();
+        }
+        arch::cpu_relax();
+    }
+}
+
+#[cfg(feature = "priority_scheduler")]
 pub fn scheduler() {
     let mut random = LinearCongruentialGenerator::default();
+    let mut arbitrary_threshold = 0;
     loop {
         unsafe { arch::intr_enable() }; // enables interrupts
         let procs = PROCS.lock();
@@ -729,13 +756,26 @@ pub fn scheduler() {
 
         // Determine a winning process
         let chosen_proc = if proc_tracker.htickets > 0 {
-            schedule_for_priority(&procs, &mut proc_tracker, &mut random, PriorityLevel::High)
+            schedule_for_priority(
+                &procs,
+                &mut proc_tracker,
+                &mut random,
+                PriorityLevel::High,
+                arbitrary_threshold,
+            )
         } else {
-            schedule_for_priority(&procs, &mut proc_tracker, &mut random, PriorityLevel::Low)
+            schedule_for_priority(
+                &procs,
+                &mut proc_tracker,
+                &mut random,
+                PriorityLevel::Low,
+                arbitrary_threshold,
+            )
         };
 
         // Schedule the winning process
         if let Some(p) = chosen_proc {
+            arbitrary_threshold += 1;
             p.set_state(ProcState::RUNNING);
             arch::mycpu_mut().set_proc(p);
             unsafe {
@@ -757,6 +797,7 @@ fn schedule_for_priority<'a>(
     proc_tracker: &mut ProcTracker,
     random: &mut LinearCongruentialGenerator,
     priority: PriorityLevel,
+    arbitrary_counter: usize,
 ) -> Option<&'a Proc> {
     let total_tickets = match priority {
         PriorityLevel::High => proc_tracker.htickets,
@@ -764,12 +805,25 @@ fn schedule_for_priority<'a>(
     };
 
     let winner = random.next(total_tickets);
+
     for p in procs
         .iter()
         .filter(|p| p.state.get() == ProcState::RUNNABLE && p.priority.get() == priority)
     {
         proc_tracker.inc_counter(p.tickets());
+        // if arbitrary_counter < 20 && p.pid.get() > 2 {
+        // println!("Total tickets: {:?}, winner: {:?}", total_tickets, winner);
+        // println!(
+        //     "Adding {:?} tickets, counter: {:?}, winner threshold: {:?}",
+        //     p.tickets(),
+        //     proc_tracker.counter,
+        //     winner
+        // );
+        // }
         if proc_tracker.counter >= winner {
+            // if arbitrary_counter < 20 && p.pid.get() > 2 {
+            //     println!("Winning PID: {:?}", p.pid());
+            // }
             return Some(p);
         }
     }

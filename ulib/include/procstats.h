@@ -19,4 +19,6 @@ typedef struct {
 
 int getpinfo(ProcStats *stats);
 
+int settickets(int tickets);
+
 #endif //RXV64_PROCSTATS_H
