@@ -49,6 +49,14 @@ fn main() {
                 ]),
         )
         .subcommand(
+            clap::Command::new("build_prio")
+                .about("Builds RXV64, syslib and ulib with priority scheduler")
+                .args(&[
+                    clap::arg!(--release "Build release version").conflicts_with("debug"),
+                    clap::arg!(--debug "Build debug version (default)").conflicts_with("release"),
+                ]),
+        )
+        .subcommand(
             clap::Command::new("expand")
                 .about("Expands RXV64 macros")
                 .args(&[
@@ -81,17 +89,22 @@ fn main() {
             clap::arg!(--debug "Build a debug version").conflicts_with("release"),
         ]))
         .subcommand(clap::Command::new("run").about("Run RXV64 under QEMU"))
+        .subcommand(
+            clap::Command::new("run_single").about("Run RXV64 under QEMU with a single core"),
+        )
         .subcommand(clap::Command::new("accelrun").about("Run RXV64 under QEMU"))
         .subcommand(clap::Command::new("clean").about("Cargo clean"))
         .get_matches();
     if let Err(e) = match matches.subcommand() {
         Some(("build", m)) => build(build_type(m)),
+        Some(("build_prio", m)) => build_prio(build_type(m)),
         Some(("expand", m)) => expand(build_type(m)),
         Some(("kasm", m)) => kasm(build_type(m)),
-        Some(("dist", m)) => dist(build_type(m)),
+        Some(("dist", m)) => dist(build_type(m), false),
         Some(("test", m)) => test(build_type(m)),
         Some(("clippy", m)) => clippy(build_type(m)),
         Some(("run", _m)) => run(),
+        Some(("run_single", _m)) => run_1(),
         Some(("accelrun", _m)) => accelrun(),
         Some(("clean", _)) => clean(),
         _ => Err("bad subcommand".into()),
@@ -151,6 +164,46 @@ fn utarget() -> String {
 fn build(profile: Build) -> Result<()> {
     kbuild(profile)?;
     ubuild(profile)?;
+    Ok(())
+}
+
+fn build_prio(profile: Build) -> Result<()> {
+    kbuild_prio(profile)?;
+    ubuild(profile)?;
+    Ok(())
+}
+
+fn kbuild_prio(profile: Build) -> Result<()> {
+    // First build the kernel with the feature flag.
+    // Then build the rest of the workspace excluding kernel and ulib.
+    let mut cmd = Command::new(cargo());
+    cmd.current_dir(workspace());
+    cmd.arg("build");
+    cmd.arg("--workspace");
+    cmd.arg("--exclude").arg("kernel"); // Exclude kernel because it's already built.
+    cmd.arg("--exclude").arg("xtask");
+    cmd.arg("--exclude").arg("ulib");
+    cmd.arg("-Z").arg("build-std=core");
+    cmd.arg("--target").arg(format!("lib/{}.json", ktarget()));
+    profile.add_build_arg(&mut cmd);
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err("build workspace failed".into());
+    }
+
+    let mut cmd = Command::new(cargo());
+    cmd.current_dir(workspace());
+    cmd.arg("build");
+    cmd.arg("--package").arg("kernel");
+    cmd.arg("--features").arg("priority_scheduler");
+    cmd.arg("-Z").arg("build-std=core");
+    cmd.arg("--target").arg(format!("lib/{}.json", ktarget()));
+    profile.add_build_arg(&mut cmd);
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err("build kernel failed".into());
+    }
+
     Ok(())
 }
 
@@ -226,8 +279,12 @@ fn kasm(profile: Build) -> Result<()> {
     Ok(())
 }
 
-fn dist(profile: Build) -> Result<()> {
-    build(profile)?;
+fn dist(profile: Build, prio: bool) -> Result<()> {
+    if prio {
+        build_prio(profile)?;
+    } else {
+        build(profile)?;
+    }
     let status = Command::new(objcopy())
         .arg("--input-target=elf64-x86-64")
         .arg("--output-target=elf32-i386")
@@ -290,7 +347,7 @@ fn clippy(profile: Build) -> Result<()> {
 // qemu-system-x86_64 -cpu host,pdpe1gb,xsaveopt,fsgsbase,apic,msr -accel kvm -smp 8 -m 8192 -curses "$@" -kernel root/rxv64.elf
 fn run() -> Result<()> {
     let profile = Build::Release;
-    dist(profile)?;
+    dist(profile, false)?;
     let status = Command::new(qemu_system_x86_64())
         //.arg("-nographic")
         //.arg("-curses")
@@ -323,9 +380,44 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+fn run_1() -> Result<()> {
+    let profile = Build::Release;
+    dist(profile, true)?;
+    let status = Command::new(qemu_system_x86_64())
+        //.arg("-nographic")
+        //.arg("-curses")
+        .arg("-s")
+        .arg("-M")
+        .arg("q35")
+        .arg("-cpu")
+        .arg("qemu64,pdpe1gb,xsaveopt,fsgsbase,apic,msr")
+        .arg("-smp")
+        .arg("1")
+        .arg("-m")
+        .arg("8192")
+        .arg("-device")
+        .arg("ahci,id=ahci0")
+        .arg("-drive")
+        .arg("id=sdahci0,file=sdahci0.img,if=none,format=raw")
+        .arg("-device")
+        .arg("ide-hd,drive=sdahci0,bus=ahci0.0")
+        .arg("-kernel")
+        .arg(format!(
+            "target/{}/{}/rxv64.elf32",
+            ktarget(),
+            profile.dir()
+        ))
+        .current_dir(workspace())
+        .status()?;
+    if !status.success() {
+        return Err("qemu failed".into());
+    }
+    Ok(())
+}
+
 fn accelrun() -> Result<()> {
     let profile = Build::Release;
-    dist(profile)?;
+    dist(profile, false)?;
     let status = Command::new(qemu_system_x86_64())
         //.arg("-nographic")
         //.arg("-curses")
