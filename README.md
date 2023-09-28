@@ -170,3 +170,39 @@ uses `settickets(n)` to allocate tickets to each process. The processes then per
 work.
 The `ps` program can then be used to demonstrate that processes are being scheduled relative to the number of tickets
 they hold.
+
+## Results
+
+In order to demonstrate the effectiveness of the scheduler, the `ticktest` program was run with 3 processes. Two of
+which
+were allocated 100 tickets and the third was allocated 800 tickets. This should result in the third process being
+scheduled
+approximately 80 percent of the time while the other two processes are scheduled approximately 10 percent of the time.
+
+### Round Robin Scheduler
+
+![Round Robin Ticks](./screenshots/rr_ticks.png)
+First, the experiment was run with the default round robin scheduler. As expected, the processes were scheduled
+approximately equally.
+
+Note - due to modifications to the `Proc` struct and `trap` handler, processes are placed on the high priority queue
+and then moved down to low priority, even when building and running with the default scheduler.
+
+### Priority Scheduler
+
+![Priority Ticks](./screenshots/priority_ticks.png)
+Next, the experiment was run with the priority scheduler. The above screenshot shows that each process was scheduled
+for one time slice on the high priority queue before being moved to lower priority. From there, the third process
+received approximately 80 percent of the time slices as expected while the other two processes each received
+approximately
+10 percent of the time slices.
+
+# Next Steps
+
+The current implementation works as expected but only on a single core. One possible solution to support multiple cores
+would be to implement an asymmetric scheduler. One core would be responsible for scheduling processes on all other cores
+while the other cores would be responsible only for executing the scheduled processes.
+
+### Rescoures to Explore
+
+[University of Wisconsin - Multiprocessor Scheduling](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched-multi.pdf)
